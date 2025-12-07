@@ -1,0 +1,117 @@
+
+pipeline {
+  agent any
+
+  environment {
+    DEPLOY_USER        = 'ubuntu'
+    DEPLOY_HOST        = '34.219.51.59'
+    DEPLOY_PATH        = '/var/www/html'
+    SSH_CREDENTIALS_ID = 'web-key'
+    REPO_URL           = 'https://github.com/Abhinandan-58/static-website-project.git'
+    BRANCH             = 'main'
+  }
+
+  stages {
+
+    stage('Checkout') {
+      steps {
+        git branch: "${BRANCH}", url: "${REPO_URL}"
+      }
+    }
+
+    stage('Prepare Remote') {
+      steps {
+        withCredentials([
+          sshUserPrivateKey(credentialsId: SSH_CREDENTIALS_ID,
+                            keyFileVariable: 'SSH_KEY',
+                            usernameVariable: 'SSH_USER')
+        ]) {
+          sh """
+            ssh -o StrictHostKeyChecking=no -i "$SSH_KEY" ${SSH_USER}@${DEPLOY_HOST} '
+              set -e
+              sudo apt-get update -y
+              sudo apt-get install -y nginx
+              sudo systemctl enable nginx
+              sudo systemctl start nginx
+              sudo mkdir -p ${DEPLOY_PATH}
+            '
+          """
+        }
+      }
+    }
+
+    stage('Upload & Deploy') {
+      steps {
+        withCredentials([
+          sshUserPrivateKey(credentialsId: SSH_CREDENTIALS_ID,
+                            keyFileVariable: 'SSH_KEY',
+                            usernameVariable: 'SSH_USER')
+        ]) {
+
+          sh """
+            # Upload workspace to remote server
+            scp -o StrictHostKeyChecking=no -i "$SSH_KEY" -r * ${SSH_USER}@${DEPLOY_HOST}:/tmp/deploy_payload || true
+
+            # Run deployment on remote
+            ssh -o StrictHostKeyChecking=no -i "$SSH_KEY" ${SSH_USER}@${DEPLOY_HOST} "
+              set -e
+              DEPLOY_PATH='${DEPLOY_PATH}'
+
+              # Clean existing files
+              sudo rm -rf \\\"\$DEPLOY_PATH\\\"/*
+
+              # Move new files
+              sudo mv /tmp/deploy_payload/* \\\"\$DEPLOY_PATH\\\"/ || true
+
+              # Rename index if needed
+              if [ -f \\\"\$DEPLOY_PATH/HomePage.html\\\" ]; then
+                sudo mv \\\"\$DEPLOY_PATH/HomePage.html\\\" \\\"\$DEPLOY_PATH/index.html\\\"
+              fi
+
+              if [ -f \\\"\$DEPLOY_PATH/Homepage.html\\\" ]; then
+                sudo mv \\\"\$DEPLOY_PATH/Homepage.html\\\" \\\"\$DEPLOY_PATH/index.html\\\"
+              fi
+
+              if [ -f \\\"\$DEPLOY_PATH/index.htm\\\" ]; then
+                sudo mv \\\"\$DEPLOY_PATH/index.htm\\\" \\\"\$DEPLOY_PATH/index.html\\\"
+              fi
+
+              # Fix permissions
+              if id www-data >/dev/null 2>&1; then
+                sudo chown -R www-data:www-data \\\"\$DEPLOY_PATH\\\"
+              elif id nginx >/dev/null 2>&1; then
+                sudo chown -R nginx:nginx \\\"\$DEPLOY_PATH\\\"
+              else
+                sudo chown -R ubuntu:ubuntu \\\"\$DEPLOY_PATH\\\"
+              fi
+
+              sudo find \\\"\$DEPLOY_PATH\\\" -type d -exec chmod 755 {} \\;
+              sudo find \\\"\$DEPLOY_PATH\\\" -type f -exec chmod 644 {} \\;
+
+              sudo systemctl restart nginx || sudo systemctl restart httpd || true
+
+              sudo rm -rf /tmp/deploy_payload || true
+
+              echo DEPLOY_OK
+            "
+          """
+        }
+      }
+    }
+
+    stage('Smoke Test') {
+      steps {
+        sh "curl -I http://${DEPLOY_HOST} | head -n 5 || true"
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "✅ Deployment succeeded — open http://${DEPLOY_HOST}"
+    }
+    failure {
+      echo "❌ Deployment failed — check console output"
+    }
+  }
+}
